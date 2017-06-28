@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	<script id="shader-fs" type="x-shader/x-fragment">
+		precision mediump float;
+
+		// Screen size (px)
+		uniform float HEIGHT_;
+		uniform float WIDTH_;
+
+		// Scene
+		const vec4 background_ = vec4(0.25, 0.25, 0.47, 1.0);
+		const float MAX_DISTANCE_ = 10000.0;
+
+		// Camera
+		struct Camera
+		{
+			vec3 position;
+			mat4 rotation;
+			float fovyRad;
+		};
+		const int MAX_CAMERA_ = 1;
+		uniform Camera camera_[MAX_CAMERA_];
+		uniform int cameraActive_;
+		uniform int cameraCount_;
+
+		// Sphere
+		struct Sphere
+		{
+			vec3 position;
+			float radius;
+			vec3 color;
+			float specularity;
+		};
+		const int MAX_SPHERE_ = 100;
+		uniform Sphere sphere_[MAX_SPHERE_];
+		uniform int sphereCount_;
+
+		// Plan
+		struct Plan
+		{
+			vec3 normal;
+			float distance;
+			vec3 color;
+			float specularity;
+		};
+		const int MAX_PLAN_ = 20;
+		uniform Plan plan_[MAX_PLAN_];
+		uniform int planCount_;
+
+		// Light
+		const int MAX_LIGHT_ = 10;
+		vec3 light_[MAX_LIGHT_];
+		const int lightCpt_ = 1;
+
+
+		struct Ray
+		{
+			vec3 position;
+			vec3 direction;
+		} ray_;
+
+		Ray initRay()
+		{
+			Ray ray;
+			ray.position = camera_[0].position;
+			ray.direction = normalize(
+				vec3(camera_[0].rotation[0]) * (gl_FragCoord.x - WIDTH_ * 0.5) +
+				vec3(camera_[0].rotation[1]) * (gl_FragCoord.y - HEIGHT_ * 0.5) +
+				vec3(camera_[0].rotation[2]) * -(HEIGHT_ / (2.0 * tan(camera_[0].fovyRad * 0.5))));
+			return ray;
+		}
+
+		struct Intersection
+		{
+			bool valid;
+			vec3 position;
+			vec3 normal;
+			vec4 color;
+			float distance;
+			float specularity;
+		} intersection_;
+
+
+		/**
+		 * 
+		 */
+		vec3 intersectionPosition(Ray ray, float distance)
+		{
+			return ray.direction * distance + ray.position;
+		}
+
+
+
+
+
+
+
+
+
+		bool intersectSphere(Ray ray, Sphere sphere, out float distance)
+		{
+			// Ray to sphere vector
+			vec3 rs = sphere.position - ray.position;
+
+			// Resolution of At² + Bt + C = 0
+
+			// ||A|| squared equals 1, so we discard A
+			// float A = dot(ray.direction, ray.direction);
+
+			// Our B is actually B / 2
+			float B = dot(ray.direction, rs);
+
+			// B = 2.0  dot(ray.direction, rs), squared, it brings to 4.0, which brings delta to 4.0  dot(ray_.direction) - 4.0  A  C. We simplified this. 
+			float C = dot(rs, rs) - (sphere.radius * sphere.radius);
+
+			// Discriminant / 4.0
+			float delta = B * B - C;
+
+
+			// If discriminant is negative, no real solution: exit
+			if(delta < 0.0)
+			{
+				distance = MAX_DISTANCE_;
+				return false;
+			}
+
+			// We only keep this solution because it's the nearest intersection with the sphere
+			// The other solution (B + sqrt(delta)) / (2.0 * A) is on the other side of the sphere
+			// If camera is in the sphere, we will not see the back side of the sphere
+			// nor the front side which is behind the screen
+
+			// Our delta is the discriminant / 4, but our B is B / 2, we have B  2  sqrt(delta * 4) / 2
+			float s = sqrt(delta);
+			float distance1 = B - s;
+			float distance2 = B + s;
+
+			float distmin = min(distance1, distance2);
+			float distmax = max(distance1, distance2);
+
+			if (distmin >= 0.0)
+			{
+				distance = distmin;
+			}
+			else if (distmax > 0.0)
+			{
+				distance = distmax;
+			} 
+			else 
+			{
+				distance = MAX_DISTANCE_;
+				return false;
+			}
+
+			return true;
+		}
+
+		bool intersectWorldSphere(Ray ray, inout float distance, out Sphere sphere)
+		{
+			float saveDistance = distance;
+			float tmpDistance = MAX_DISTANCE_;
+
+			for(int i = 0 ; i < MAX_SPHERE_ ; ++i)
+			{
+				if(i > sphereCount_ - 1)
+				{
+					break;
+				}
+
+				if(intersectSphere(ray, sphere_[i], tmpDistance))
+				{
+					if(tmpDistance < distance)
+					{
+						distance = tmpDistance;
+						sphere = sphere_[i];
+					}
+				}
+			}
+
+			return distance != saveDistance;
+		}
+
+		bool intersectPlan(Ray ray, Plan plan, out float distance)
+		{
+			float denominator = dot(plan.normal, ray.direction);
+
+			if(denominator == 0.0)
+			{
+				distance = MAX_DISTANCE_; 
+				return false;
+			}
+
+			distance = -(plan.distance + dot(ray.position, plan.normal)) / denominator;
+
+			if(distance < 0.0)
+			{
+				distance = MAX_DISTANCE_;
+				return false;
+			}
+
+			return true;
+		}
+
+		bool intersectWorldPlan(Ray ray, inout float distance, out Plan plan)
+		{
+			float saveDistance = distance;
+			float tmpDistance = MAX_DISTANCE_;
+
+			for(int i = 0 ; i < MAX_PLAN_ ; i++)
+			{
+				if(i > planCount_ - 1)
+				{
+					break;
+				}
+
+				if(intersectPlan(ray, plan_[i], tmpDistance))
+				{
+					if(tmpDistance < distance)
+					{
+						distance = tmpDistance;
+						plan = plan_[i];
+					}
+				}
+			}
+
+			return distance != saveDistance;
+		}
+
+		bool intersectWorldLight(inout Intersection intersection)
+		{
+			bool r = true;
+			Ray checkLight;
+
+			Sphere sphere;
+			Plan plan;
+
+			for(int i = 0 ; i < MAX_LIGHT_ ; i++)
+			{
+				if(i < lightCpt_)
+				{
+					checkLight.direction = normalize(light_[i] - intersection.position);
+					checkLight.position = intersection.position + checkLight.direction * 0.005; // to be out of the surface
+
+					// TODO: Inverser l'ordre intersectGeometry -> intersectLight pour une meilleure perf ?
+					vec3 rayToLight = light_[i] - checkLight.position;
+					float distance = sqrt(dot(rayToLight, rayToLight));
+					if(dot(checkLight.direction, intersection.normal) > 0.0)
+					{
+						if(intersectWorldSphere(checkLight, distance, sphere)
+						|| intersectWorldPlan(checkLight, distance, plan))
+							r = false;
+						// if(intersectWorldSphere(checkLight, distance, sphere))
+						// 	r = false;
+					}
+					else
+					{
+						r = false;
+					}
+
+					// Smooth shadowing
+					intersection.color.xyz *= dot(intersection.normal, checkLight.direction);
+				}
+				else
+				{
+					break;
+				}
+			}
+
+			return r;
+		}
+
+		Intersection intersectWorld(Ray ray, inout float distance)
+		{
+			Intersection intersection;
+			intersection.valid = false;
+
+			Sphere sphere;
+			if(intersectWorldSphere(ray, distance, sphere))
+			{
+				intersection.valid = true;
+				intersection.position = intersectionPosition(ray, distance);
+				intersection.normal = normalize(intersection.position - sphere.position);
+				intersection.color = vec4(sphere.color, 1);
+				intersection.distance = distance;
+				intersection.specularity = sphere.specularity;
+			}
+
+			Plan plan;
+			if(intersectWorldPlan(ray, distance, plan))
+			{
+				intersection.valid = true;
+				intersection.position = intersectionPosition(ray, distance);
+				intersection.normal = plan.normal;
+				intersection.color = vec4(plan.color, 1);
+				intersection.distance = distance;
+				intersection.specularity = plan.specularity;
+			}
+
+			if(intersectWorldLight(intersection))
+			{
+				// Try this, it's wonderful
+				// intersection.color = vec4(intersection.normal, 1.0);
+			}
+			else
+			{
+				intersection.color = vec4(0, 0, 0, 1);
+			}
+
+			return intersection;
+		}
+
+		void main(void)
+		{
+			//light_[0] = vec3(10, 12, 0); // behind light
+			light_[0] = vec3(10, 12, 52);
+			//light_[0] = vec3(5, 5, 70); // in front light
+
+			vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+
+			// setRayPosition();
+			// setRayDirection();
+
+			Ray ray = initRay();
+
+			float distance = MAX_DISTANCE_;
+
+			Intersection intersection = intersectWorld(ray, distance);
+			if(intersection.valid && intersection.specularity == 1.0)
+			{
+				const int MAX_REFLECTION_ = 40;
+				Intersection intersectionReflection = intersection;
+				Ray reflectionRay = ray;
+
+				for(int reflectionCpt = 0 ; reflectionCpt < MAX_REFLECTION_ ; ++reflectionCpt)
+				{
+					reflectionRay.direction = reflect(reflectionRay.direction, intersectionReflection.normal);
+					reflectionRay.position = intersectionReflection.position + reflectionRay.direction * 0.001;
+					// intersection.color = vec4(intersection.normal, 1.0);
+					// intersection.color = vec4(reflectionRay.direction, 1.0);
+					color = intersectionReflection.color;
+					float reflectionDistance = MAX_DISTANCE_;
+					intersectionReflection = intersectWorld(reflectionRay, reflectionDistance);
+					if(intersectionReflection.valid)
+					{
+						// intersection.color = (intersection.color * 0.1 + intersectionReflection.color * 0.9);
+						// * (intersection.color.x + intersection.color.y + intersection.color.z) / 3.0;
+						// intersection.color = vec4(intersection.normal, 1.0);
+						// intersection.color = vec4(reflectionRay.direction, 1.0);
+						// intersection.color = vec4(0, 0, 1, 1);
+
+						intersection.color = vec4(intersectionReflection.color.xyz * pow(0.9, float(reflectionCpt + 1)), 1.0);
+					}
+					else
+					{
+						intersection.color = vec4(background_.xyz * pow(0.9, float(reflectionCpt + 1)), 1);
+						break;
+					}
+
+					if(intersectionReflection.specularity != 1.0)
+					{
+						break;
+					}
+				}
+				// intersection.color = vec4(intersectionReflection.color.xyz * pow(0.5, float(reflectionCpt)), 1.0);
+			}
+
+
+			if(intersection.valid)
+			{
+				gl_FragColor = intersection.color;
+				if(sphereCount_ == 0 && false)
+					gl_FragColor = vec4(0, 1, 1, 1);
+			}
+			else
+			{
+				gl_FragColor = background_;
+			}
+		}
+	</script>
+
+	<script id="shader-vs" type="x-shader/x-vertex">
+		attribute vec3 aVertexPosition;
+		void main(void)
+		{
+			gl_Position = vec4(aVertexPosition, 1.0);
+		}
+	</script>
+
+	<script type="text/javascript" src="glMatrix.js"></script>
+	<script type="text/javascript" src="Shader.js"></script>
+	<script type="text/javascript" src="Sphere.js"></script>
+	<script type="text/javascript" src="Plan.js"  ></script>
+	<script type="text/javascript" src="Camera.js"></script>
+	<script type="text/javascript" src="RayTracerWebGL.js"></script>
+
+	<link rel="stylesheet" type="text/css" href="RayTracerWebGL.css">
+	<title>RayTracer</title>
+</head>
+
+<body onLoad="start();">
+
+	<p>Hello, this is a webGL page with a beautiful raytracer.</p>
+	<canvas id="3DScene" width="800" height="400">
+		Your browser does not support the HTML5 canvas tag.
+	</canvas>
+
+	<div id=buttonsContainer>
+		<button id=buttonScene1 type="button" onclick="drawScene1()">Scene 1</button>
+		<button id=buttonScene2 type="button" onclick="drawScene2()">Scene 2</button>
+	</div>
+</body>
+
+</html>
